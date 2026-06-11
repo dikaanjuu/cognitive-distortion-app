@@ -95,7 +95,7 @@ MULTICLASS_LABELS_PATH = (
 
 HF_REPO_ID = (
     "jjunion/"
-    "cognitive-distortion-indobert"
+    "cognitive-distortion-indobert-v2"
 )
 
 HF_CACHE_DIR = Path(

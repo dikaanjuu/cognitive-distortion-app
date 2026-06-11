@@ -1,0 +1,10 @@
+{
+  "model_name": "indobenchmark/indobert-base-p2",
+  "max_len": 256,
+  "num_classes": 11,
+  "seeds": [
+    42,
+    123,
+    2025
+  ]
+}

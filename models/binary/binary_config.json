@@ -1,0 +1,19 @@
+{
+  "model_name": "indobenchmark/indobert-base-p2",
+  "max_len": 256,
+  "num_classes": 2,
+  "threshold": 0.5,
+  "labels": [
+    "No Distortion",
+    "Distortion"
+  ],
+  "seeds": [
+    42,
+    123,
+    2025
+  ],
+  "text_cleaning": {
+    "remove_dollar_symbol": true,
+    "normalize_whitespace": true
+  }
+}

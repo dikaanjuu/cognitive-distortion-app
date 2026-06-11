@@ -4,7 +4,10 @@
   "num_classes": 11,
   "seeds": [
     42,
-    123,
-    2025
-  ]
+    123
+  ],
+  "text_cleaning": {
+    "remove_dollar_symbol": true,
+    "normalize_whitespace": true
+  }
 }

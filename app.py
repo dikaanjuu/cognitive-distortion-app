@@ -1,8 +1,30 @@
 from __future__ import annotations
 
+import os
+
+# ============================================================
+# HUGGING FACE DOWNLOAD SETTINGS
+# ============================================================
+# WAJIB berada sebelum import huggingface_hub dan transformers.
+
+# Hindari error transfer Xet pada Streamlit Community Cloud.
+# Download checkpoint dilakukan melalui HTTP biasa.
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+# Tambahkan batas waktu untuk file model berukuran besar.
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "180"
+
+# Gunakan cache baru agar cache parsial lama tidak dipakai kembali.
+os.environ["HF_HUB_CACHE"] = (
+    "/tmp/cognitive_distortion_hf_cache_v3"
+)
+
+
 import gc
 import json
 import re
+import time
+
 from pathlib import Path
 from typing import Any
 
@@ -29,14 +51,14 @@ st.set_page_config(
     layout="wide"
 )
 
-# Batasi thread CPU agar lebih aman untuk hosting gratis.
+# Batasi thread CPU agar lebih aman pada hosting gratis.
 torch.set_num_threads(
     2
 )
 
 
 # ============================================================
-# CONSTANTS AND LOCAL PATHS
+# LOCAL PATH CONFIGURATION
 # ============================================================
 
 BASE_DIR = (
@@ -67,10 +89,24 @@ MULTICLASS_LABELS_PATH = (
 )
 
 
-# Repository Hugging Face Anda
+# ============================================================
+# HUGGING FACE REPOSITORY CONFIGURATION
+# ============================================================
+
 HF_REPO_ID = (
     "jjunion/"
     "cognitive-distortion-indobert"
+)
+
+HF_CACHE_DIR = Path(
+    os.environ[
+        "HF_HUB_CACHE"
+    ]
+)
+
+HF_CACHE_DIR.mkdir(
+    parents=True,
+    exist_ok=True
 )
 
 DEFAULT_SEEDS = [
@@ -78,6 +114,11 @@ DEFAULT_SEEDS = [
     123,
     2025
 ]
+
+
+# ============================================================
+# DEVICE
+# ============================================================
 
 DEVICE = torch.device(
     "cuda"
@@ -87,7 +128,7 @@ DEVICE = torch.device(
 
 
 # ============================================================
-# CONFIGURATION HELPERS
+# JSON CONFIGURATION HELPERS
 # ============================================================
 
 def read_json(
@@ -130,38 +171,38 @@ def validate_configuration(
         "num_classes"
     }
 
-    missing_binary = (
+    missing_binary_keys = (
         required_binary_keys
         - set(
             binary_config
         )
     )
 
-    missing_multiclass = (
+    missing_multiclass_keys = (
         required_multiclass_keys
         - set(
             multiclass_config
         )
     )
 
-    if missing_binary:
+    if missing_binary_keys:
 
         raise ValueError(
             "Key binary_config.json belum lengkap: "
             + ", ".join(
                 sorted(
-                    missing_binary
+                    missing_binary_keys
                 )
             )
         )
 
-    if missing_multiclass:
+    if missing_multiclass_keys:
 
         raise ValueError(
             "Key multiclass_config.json belum lengkap: "
             + ", ".join(
                 sorted(
-                    missing_multiclass
+                    missing_multiclass_keys
                 )
             )
         )
@@ -273,10 +314,10 @@ def build_checkpoint_paths(
 def get_hf_token() -> str | None:
 
     """
-    Repository public tidak memerlukan token.
+    Repository publik tidak memerlukan token.
 
-    Jika repository diubah menjadi private,
-    tambahkan HF_TOKEN pada Streamlit Secrets.
+    Apabila repository diubah menjadi private,
+    simpan HF_TOKEN melalui Streamlit Secrets.
     """
 
     try:
@@ -292,26 +333,114 @@ def get_hf_token() -> str | None:
 
 
 # ============================================================
-# HUGGING FACE DOWNLOAD
+# HUGGING FACE DOWNLOAD HELPERS
 # ============================================================
+
+def clear_incomplete_downloads() -> None:
+
+    """
+    Hapus file download parsial.
+
+    Checkpoint yang sudah selesai tetap disimpan
+    agar dapat digunakan kembali dari cache.
+    """
+
+    if not HF_CACHE_DIR.exists():
+
+        return
+
+    for incomplete_file in HF_CACHE_DIR.rglob(
+        "*.incomplete"
+    ):
+
+        try:
+
+            incomplete_file.unlink()
+
+        except FileNotFoundError:
+
+            pass
+
+
+def is_retryable_download_error(
+    error: Exception
+) -> bool:
+
+    error_message = str(
+        error
+    )
+
+    retryable_markers = (
+        "File size mismatch",
+        "Consistency check failed",
+        "downloaded",
+        "incomplete",
+        "Timeout",
+        "timed out"
+    )
+
+    return any(
+        marker in error_message
+        for marker in retryable_markers
+    )
+
 
 def download_checkpoint(
     filename: str
 ) -> str:
 
     """
-    Mengambil checkpoint dari Hugging Face Hub.
+    Download checkpoint melalui HTTP biasa.
 
-    Jika file sudah pernah diunduh,
-    Hugging Face menggunakan disk cache lokal.
+    Percobaan pertama menggunakan cache.
+    Jika file parsial atau ukurannya tidak sesuai,
+    file parsial dihapus dan download diulang sekali.
     """
 
-    return hf_hub_download(
-        repo_id=HF_REPO_ID,
-        filename=filename,
-        repo_type="model",
-        token=get_hf_token()
-    )
+    download_arguments = {
+
+        "repo_id":
+            HF_REPO_ID,
+
+        "filename":
+            filename,
+
+        "repo_type":
+            "model",
+
+        "token":
+            get_hf_token(),
+
+        "cache_dir":
+            str(
+                HF_CACHE_DIR
+            )
+    }
+
+    try:
+
+        return hf_hub_download(
+            **download_arguments
+        )
+
+    except Exception as error:
+
+        if not is_retryable_download_error(
+            error
+        ):
+
+            raise
+
+        clear_incomplete_downloads()
+
+        time.sleep(
+            1
+        )
+
+        return hf_hub_download(
+            **download_arguments,
+            force_download=True
+        )
 
 
 # ============================================================
@@ -324,10 +453,10 @@ def clean_text(
 ) -> str:
 
     """
-    Cleaning sama dengan notebook training.
+    Cleaning sama seperti preprocessing notebook.
 
     Simbol $ dihapus.
-    Isi teks di antara simbol tetap dipertahankan.
+    Isi kalimat tetap dipertahankan.
     """
 
     cleaning_config = (
@@ -373,11 +502,11 @@ class BertClassifier(
 ):
 
     """
-    Arsitektur sama dengan model saat training:
+    Arsitektur klasifikasi:
 
-    IndoBERT
+    IndoBERT Base P2
     ↓
-    CLS representation
+    CLS Representation
     ↓
     Linear 768 → 512
     ↓
@@ -387,7 +516,7 @@ class BertClassifier(
     ↓
     Multi-Sample Dropout
     ↓
-    Linear output
+    Linear Output
     """
 
     def __init__(
@@ -402,8 +531,8 @@ class BertClassifier(
             model_name
         )
 
-        # Checkpoint fine-tuning menyimpan bobot backbone lengkap.
-        # Backbone cukup dibuat dari config.
+        # Backbone dibuat dari konfigurasi.
+        # Bobot lengkap akan dimuat dari checkpoint hasil fine-tuning.
         self.bert = AutoModel.from_config(
             config
         )
@@ -485,8 +614,8 @@ class BertClassifier(
             x
         )
 
-        # Saat model.eval(), dropout tidak aktif.
-        # Rata-rata lima cabang identik dengan satu kali fc2(x).
+        # Saat model.eval(), seluruh dropout nonaktif.
+        # Rata-rata lima cabang sama dengan satu kali fc2(x).
         logits = self.fc2(
             x
         )
@@ -560,9 +689,8 @@ def load_state_dict_low_memory(
 ):
 
     """
-    mmap=True mengurangi lonjakan RAM ketika checkpoint besar dibaca.
-
-    Fallback dipakai jika versi PyTorch tidak mendukung mmap.
+    mmap=True membantu menekan lonjakan RAM
+    saat checkpoint besar dibaca dari disk.
     """
 
     try:
@@ -574,21 +702,46 @@ def load_state_dict_low_memory(
             mmap=True
         )
 
+    except (
+        TypeError,
+        RuntimeError
+    ):
+
+        return torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True
+        )
+
+
+def load_weights_into_model(
+    model: BertClassifier,
+    state_dict: dict
+) -> None:
+
+    """
+    assign=True membantu mengurangi penggunaan memori
+    pada versi PyTorch yang mendukungnya.
+    """
+
+    try:
+
+        model.load_state_dict(
+            state_dict,
+            strict=True,
+            assign=True
+        )
+
     except TypeError:
 
-        return torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=True
+        model.load_state_dict(
+            state_dict,
+            strict=True
         )
 
-    except RuntimeError:
-
-        return torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=True
-        )
+    model.to(
+        DEVICE
+    )
 
 
 # ============================================================
@@ -606,10 +759,10 @@ def predict_stage_sequentially(
 ) -> torch.Tensor:
 
     """
-    Hanya satu objek model berada di RAM.
+    Hanya satu objek IndoBERT berada di RAM.
 
-    Bobot seed 42, 123, dan 2025
-    dimuat bergantian ke objek model yang sama.
+    Bobot seed 42, 123, dan 2025 dimuat
+    secara bergantian ke objek model yang sama.
     """
 
     tokens = tokenize_text(
@@ -630,7 +783,7 @@ def predict_stage_sequentially(
     if total_models == 0:
 
         raise ValueError(
-            "Checkpoint ensemble tidak ditemukan."
+            "Checkpoint ensemble tidak tersedia."
         )
 
     progress_bar = st.progress(
@@ -641,8 +794,6 @@ def predict_stage_sequentially(
     model = BertClassifier(
         model_name=model_name,
         num_classes=num_classes
-    ).to(
-        DEVICE
     )
 
     try:
@@ -674,9 +825,9 @@ def predict_stage_sequentially(
                 checkpoint_path
             )
 
-            model.load_state_dict(
-                state_dict,
-                strict=True
+            load_weights_into_model(
+                model=model,
+                state_dict=state_dict
             )
 
             del state_dict
@@ -710,14 +861,18 @@ def predict_stage_sequentially(
             del logits
             del probabilities
 
+            if DEVICE.type == "cuda":
+
+                model.to(
+                    "cpu"
+                )
+
             release_memory()
 
         progress_bar.progress(
             100,
             text=f"{stage_label} selesai."
         )
-
-        progress_bar.empty()
 
         return (
             probability_sum
@@ -726,6 +881,8 @@ def predict_stage_sequentially(
 
     finally:
 
+        progress_bar.empty()
+
         del model
         del tokens
 
@@ -733,7 +890,7 @@ def predict_stage_sequentially(
 
 
 # ============================================================
-# PREDICTION FUNCTIONS
+# BINARY PREDICTION
 # ============================================================
 
 def predict_binary(
@@ -814,6 +971,10 @@ def predict_binary(
             distortion_probability
     }
 
+
+# ============================================================
+# MULTICLASS PREDICTION
+# ============================================================
 
 def predict_multiclass(
     text: str,
@@ -950,13 +1111,16 @@ with st.sidebar:
     )
 
     st.write(
+        "Checkpoint: Hugging Face Hub"
+    )
+
+    st.write(
         f"Device: `{DEVICE}`"
     )
 
     st.caption(
         """
-        Checkpoint diambil dari Hugging Face Hub.
-        Hanya satu model dimuat pada satu waktu untuk menghemat RAM.
+        Satu model dimuat pada satu waktu untuk menghemat RAM.
         Simbol anotasi `$` dibersihkan tanpa menghapus isi kalimat.
         """
     )
